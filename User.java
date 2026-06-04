@@ -1,123 +1,136 @@
 package Common;
 
-public class Order {
-    // Campi obbligatori
-    private long orderId;
+public class User {
     private String username;
-    private String type;           // "ask" o "bid"
-    private String orderType;      // "market", "limit", "stop"
-    private long size;             // dimensione originale in millesimi di BTC
-    private long remainingSize;    // quanto resta da evadere
-    private long timestamp;        // epoch seconds
-    private OrderStatus status;
-
-    // Campi opzionali
-    private Long limitPrice;       // per "limit" orders (millesimi di USD)
-    private Long stopPrice;        // per "stop" orders (millesimi di USD)
-    private Long executionPrice;   // prezzo finale di esecuzione (millesimi di USD)
-
-    public enum OrderStatus {
-        ACTIVE, PARTIALLY_FILLED, COMPLETED, CANCELLED
-    }
+    private String password;
+    private boolean isLoggedIn;
+    private long lastActivity;  // timestamp dell'ultima attività (per timeout)
+    private long registrationTimestamp;
 
     // Costruttore vuoto per JSON parsing
-    public Order() {}
+    public User() {}
 
-    // Market Order
-    public Order(long orderId, String username, String type, long size) {
-        this.orderId = orderId;
+    // Costruttore per nuova registrazione
+    public User(String username, String password) {
         this.username = username;
-        this.type = type;
-        this.orderType = "market";
-        this.size = size;
-        this.remainingSize = size;
-        this.timestamp = System.currentTimeMillis() / 1000;
-        this.status = OrderStatus.ACTIVE;
-    }
-
-    // Limit Order
-    public Order(long orderId, String username, String type, long size, long limitPrice) {
-        this.orderId = orderId;
-        this.username = username;
-        this.type = type;
-        this.orderType = "limit";
-        this.size = size;
-        this.remainingSize = size;
-        this.limitPrice = limitPrice;
-        this.timestamp = System.currentTimeMillis() / 1000;
-        this.status = OrderStatus.ACTIVE;
-    }
-
-    // Stop Order
-    public Order(long orderId, String username, String type, long size, long stopPrice, boolean isStopOrder) {
-        this.orderId = orderId;
-        this.username = username;
-        this.type = type;
-        this.orderType = "stop";
-        this.size = size;
-        this.remainingSize = size;
-        this.stopPrice = stopPrice;
-        this.timestamp = System.currentTimeMillis() / 1000;
-        this.status = OrderStatus.ACTIVE;
+        this.password = password;
+        this.isLoggedIn = false;
+        this.lastActivity = 0;
+        this.registrationTimestamp = System.currentTimeMillis() / 1000;
     }
 
     // Getter e Setter
-    public long getOrderId() { return orderId; }
-    public void setOrderId(long orderId) { this.orderId = orderId; }
-
     public String getUsername() { return username; }
     public void setUsername(String username) { this.username = username; }
 
-    public String getType() { return type; }
-    public void setType(String type) { this.type = type; }
+    public String getPassword() { return password; }
+    public void setPassword(String password) { this.password = password; }
 
-    public String getOrderType() { return orderType; }
-    public void setOrderType(String orderType) { this.orderType = orderType; }
+    public boolean isLoggedIn() { return isLoggedIn; }
+    public void setLoggedIn(boolean loggedIn) { this.isLoggedIn = loggedIn; }
 
-    public long getSize() { return size; }
-    public void setSize(long size) { this.size = size; }
+    public long getLastActivity() { return lastActivity; }
+    public void setLastActivity(long lastActivity) { this.lastActivity = lastActivity; }
 
-    public long getRemainingSize() { return remainingSize; }
-    public void setRemainingSize(long remainingSize) { this.remainingSize = remainingSize; }
-
-    public long getTimestamp() { return timestamp; }
-    public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
-
-    public OrderStatus getStatus() { return status; }
-    public void setStatus(OrderStatus status) { this.status = status; }
-
-    public Long getLimitPrice() { return limitPrice; }
-    public void setLimitPrice(Long limitPrice) { this.limitPrice = limitPrice; }
-
-    public Long getStopPrice() { return stopPrice; }
-    public void setStopPrice(Long stopPrice) { this.stopPrice = stopPrice; }
-
-    public Long getExecutionPrice() { return executionPrice; }
-    public void setExecutionPrice(Long executionPrice) { this.executionPrice = executionPrice; }
+    public long getRegistrationTimestamp() { return registrationTimestamp; }
+    public void setRegistrationTimestamp(long registrationTimestamp) { this.registrationTimestamp = registrationTimestamp; }
 
     // Metodi di utilità
-    public boolean isCompleted() {
-        return status == OrderStatus.COMPLETED;
+
+    /**
+     * Verifica se la password fornita corrisponde a quella dell'utente
+     */
+    public boolean verifyPassword(String inputPassword) {
+        return this.password != null && this.password.equals(inputPassword);
     }
 
-    public boolean canBeCancelled() {
-        return status == OrderStatus.ACTIVE || status == OrderStatus.PARTIALLY_FILLED;
+    /**
+     * Effettua il login dell'utente aggiornando timestamp
+     */
+    public void login() {
+        this.isLoggedIn = true;
+        this.lastActivity = System.currentTimeMillis() / 1000;
     }
 
-    public void executePartially(long executedSize, long price) {
-        this.remainingSize -= executedSize;
-        this.executionPrice = price;
+    /**
+     * Effettua il logout dell'utente
+     */
+    public void logout() {
+        this.isLoggedIn = false;
+        this.lastActivity = 0;
+    }
 
-        if (this.remainingSize <= 0) {
-            this.status = OrderStatus.COMPLETED;
-        } else {
-            this.status = OrderStatus.PARTIALLY_FILLED;
+    /**
+     * Aggiorna il timestamp dell'ultima attività
+     */
+    public void updateActivity() {
+        if (this.isLoggedIn) {
+            this.lastActivity = System.currentTimeMillis() / 1000;
         }
+    }
+
+    /**
+     * Verifica se l'utente è inattivo da troppo tempo
+     * @param timeoutSeconds timeout in secondi
+     * @return true se l'utente è inattivo da più di timeoutSeconds
+     */
+    public boolean isInactive(long timeoutSeconds) {
+        if (!this.isLoggedIn) return false;
+
+        long currentTime = System.currentTimeMillis() / 1000;
+        return (currentTime - this.lastActivity) > timeoutSeconds;
+    }
+
+    /**
+     * Cambia la password dell'utente
+     * @param oldPassword password attuale
+     * @param newPassword nuova password
+     * @return true se il cambio è avvenuto con successo
+     */
+    public boolean changePassword(String oldPassword, String newPassword) {
+        // Verifica password attuale
+        if (!verifyPassword(oldPassword)) {
+            return false;
+        }
+
+        // Verifica che la nuova password sia diversa
+        if (oldPassword.equals(newPassword)) {
+            return false;
+        }
+
+        // Verifica che la nuova password non sia vuota
+        if (newPassword == null || newPassword.trim().isEmpty()) {
+            return false;
+        }
+
+        this.password = newPassword;
+        return true;
+    }
+
+    /**
+     * Validazione per nuova registrazione
+     */
+    public static boolean isValidForRegistration(String username, String password) {
+        return username != null && !username.trim().isEmpty() &&
+                password != null && !password.trim().isEmpty();
     }
 
     @Override
     public String toString() {
-        return String.format("Order{id=%d, user='%s', type='%s', orderType='%s', size=%d, remaining=%d, status=%s}",
-                orderId, username, type, orderType, size, remainingSize, status);
+        return String.format("User{username='%s', isLoggedIn=%s, lastActivity=%d}",
+                username, isLoggedIn, lastActivity);
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (this == obj) return true;
+        if (obj == null || getClass() != obj.getClass()) return false;
+        User user = (User) obj;
+        return username != null ? username.equals(user.username) : user.username == null;
+    }
+
+    @Override
+    public int hashCode() {
+        return username != null ? username.hashCode() : 0;
     }
 }

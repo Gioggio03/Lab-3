@@ -1,143 +1,123 @@
 package Common;
 
-public class Constants {
+public class Order {
+    // Campi obbligatori
+    private long orderId;
+    private String username;
+    private String type;           // "ask" o "bid"
+    private String orderType;      // "market", "limit", "stop"
+    private long size;             // dimensione originale in millesimi di BTC
+    private long remainingSize;    // quanto resta da evadere
+    private long timestamp;        // epoch seconds
+    private OrderStatus status;
 
-    // ======= CONFIGURAZIONI DI RETE =======
+    // Campi opzionali
+    private Long limitPrice;       // per "limit" orders (millesimi di USD)
+    private Long stopPrice;        // per "stop" orders (millesimi di USD)
+    private Long executionPrice;   // prezzo finale di esecuzione (millesimi di USD)
 
-    // Porte default (possono essere sovrascritte dai file di configurazione)
-    public static final int DEFAULT_TCP_PORT = 8080;
-    public static final int DEFAULT_UDP_PORT = 8081;
-
-    // Timeout in millisecondi
-    public static final int TCP_CONNECTION_TIMEOUT = 30000;  // 30 secondi
-    public static final int TCP_READ_TIMEOUT = 60000;        // 60 secondi
-    public static final int UDP_TIMEOUT = 5000;              // 5 secondi
-
-    // Configurazioni per il thread pool del server
-    public static final int THREAD_POOL_SIZE = 20;
-    public static final int MAX_QUEUE_SIZE = 100;
-
-    // ======= CODICI DI RISPOSTA =======
-
-    // Codici di successo
-    public static final int RESPONSE_OK = 100;
-
-    // Codici di errore per register
-    public static final int RESPONSE_INVALID_PASSWORD = 101;
-    public static final int RESPONSE_USERNAME_NOT_AVAILABLE = 102;
-    public static final int RESPONSE_REGISTER_OTHER_ERROR = 103;
-
-    // Codici di errore per updateCredentials
-    public static final int RESPONSE_UPDATE_INVALID_NEW_PASSWORD = 101;
-    public static final int RESPONSE_UPDATE_USERNAME_PASSWORD_MISMATCH = 102;
-    public static final int RESPONSE_UPDATE_SAME_PASSWORD = 103;
-    public static final int RESPONSE_UPDATE_USER_LOGGED_IN = 104;
-    public static final int RESPONSE_UPDATE_OTHER_ERROR = 105;
-
-    // Codici di errore per login
-    public static final int RESPONSE_LOGIN_USERNAME_PASSWORD_MISMATCH = 101;
-    public static final int RESPONSE_LOGIN_USER_ALREADY_LOGGED_IN = 102;
-    public static final int RESPONSE_LOGIN_OTHER_ERROR = 103;
-
-    // Codici di errore per logout
-    public static final int RESPONSE_LOGOUT_ERROR = 101;
-
-    // Codici di errore per cancelOrder
-    public static final int RESPONSE_CANCEL_ORDER_ERROR = 101;
-
-    // Valore per ordini con errore
-    public static final long ORDER_ERROR_ID = -1L;
-
-    // ======= CONFIGURAZIONI DI BUSINESS =======
-
-    // Timeout per logout automatico (in secondi)
-    public static final long USER_INACTIVITY_TIMEOUT = 1800; // 30 minuti
-
-    // Limiti per gli ordini
-    public static final long MAX_ORDER_SIZE = (1L << 31) - 1;  // (2^31)-1 come da specifica
-    public static final long MAX_ORDER_PRICE = (1L << 31) - 1; // (2^31)-1 come da specifica
-    public static final long MIN_ORDER_SIZE = 1;               // Minimo 1 millesimo di BTC
-    public static final long MIN_ORDER_PRICE = 1;              // Minimo 1 millesimo di USD
-
-    // ======= CONFIGURAZIONI PER FILE =======
-
-    // Nomi dei file per la persistenza
-    public static final String USERS_FILE = "data/users.json";
-    public static final String ORDERS_HISTORY_FILE = "data/orders_history.json";
-    public static final String ACTIVE_ORDERS_BACKUP_FILE = "data/active_orders_backup.json";
-
-    // Frequenza di salvataggio (in millisecondi)
-    public static final long PERSISTENCE_INTERVAL = 60000; // 1 minuto
-
-    // ======= CONFIGURAZIONI PER DATE =======
-
-    // Formato per il mese in getPriceHistory (MMYYYY)
-    public static final String MONTH_FORMAT_REGEX = "^(0[1-9]|1[0-2])\\d{4}$"; // es. 012024
-
-    // ======= MESSAGGI DI ERRORE STANDARD =======
-
-    public static final String ERROR_INVALID_JSON = "Invalid JSON format";
-    public static final String ERROR_MISSING_OPERATION = "Missing operation field";
-    public static final String ERROR_UNKNOWN_OPERATION = "Unknown operation";
-    public static final String ERROR_USER_NOT_LOGGED_IN = "User not logged in";
-    public static final String ERROR_INSUFFICIENT_PARAMETERS = "Insufficient parameters";
-    public static final String ERROR_INVALID_ORDER_TYPE = "Invalid order type (must be 'ask' or 'bid')";
-    public static final String ERROR_INVALID_ORDER_SIZE = "Invalid order size";
-    public static final String ERROR_INVALID_ORDER_PRICE = "Invalid order price";
-    public static final String ERROR_ORDER_NOT_FOUND = "Order not found";
-    public static final String ERROR_SERVER_INTERNAL = "Internal server error";
-
-    // ======= CONFIGURAZIONI PER NOTIFICHE =======
-
-    // Tipi di notifiche
-    public static final String NOTIFICATION_CLOSED_TRADES = "closedTrades";
-
-    // ======= CONFIGURAZIONI PER ORDER BOOK =======
-
-    // Priorità per l'algoritmo di matching (time/price priority)
-    public static final String MATCHING_ALGORITHM = "TIME_PRICE_PRIORITY";
-
-    // ======= METODI DI UTILITÀ =======
-
-    /**
-     * Verifica se un codice di risposta indica successo
-     */
-    public static boolean isSuccessResponse(int responseCode) {
-        return responseCode == RESPONSE_OK;
+    public enum OrderStatus {
+        ACTIVE, PARTIALLY_FILLED, COMPLETED, CANCELLED
     }
 
-    /**
-     * Verifica se un tipo di ordine è valido
-     */
-    public static boolean isValidOrderType(String type) {
-        return "ask".equals(type) || "bid".equals(type);
+    // Costruttore vuoto per JSON parsing
+    public Order() {}
+
+    // Market Order
+    public Order(long orderId, String username, String type, long size) {
+        this.orderId = orderId;
+        this.username = username;
+        this.type = type;
+        this.orderType = "market";
+        this.size = size;
+        this.remainingSize = size;
+        this.timestamp = System.currentTimeMillis() / 1000;
+        this.status = OrderStatus.ACTIVE;
     }
 
-    /**
-     * Verifica se una dimensione di ordine è valida
-     */
-    public static boolean isValidOrderSize(long size) {
-        return size >= MIN_ORDER_SIZE && size <= MAX_ORDER_SIZE;
+    // Limit Order
+    public Order(long orderId, String username, String type, long size, long limitPrice) {
+        this.orderId = orderId;
+        this.username = username;
+        this.type = type;
+        this.orderType = "limit";
+        this.size = size;
+        this.remainingSize = size;
+        this.limitPrice = limitPrice;
+        this.timestamp = System.currentTimeMillis() / 1000;
+        this.status = OrderStatus.ACTIVE;
     }
 
-    /**
-     * Verifica se un prezzo di ordine è valido
-     */
-    public static boolean isValidOrderPrice(long price) {
-        return price >= MIN_ORDER_PRICE && price <= MAX_ORDER_PRICE;
+    // Stop Order
+    public Order(long orderId, String username, String type, long size, long stopPrice, boolean isStopOrder) {
+        this.orderId = orderId;
+        this.username = username;
+        this.type = type;
+        this.orderType = "stop";
+        this.size = size;
+        this.remainingSize = size;
+        this.stopPrice = stopPrice;
+        this.timestamp = System.currentTimeMillis() / 1000;
+        this.status = OrderStatus.ACTIVE;
     }
 
-    /**
-     * Verifica se un formato mese è valido (MMYYYY)
-     */
-    public static boolean isValidMonthFormat(String month) {
-        return month != null && month.matches(MONTH_FORMAT_REGEX);
+    // Getter e Setter
+    public long getOrderId() { return orderId; }
+    public void setOrderId(long orderId) { this.orderId = orderId; }
+
+    public String getUsername() { return username; }
+    public void setUsername(String username) { this.username = username; }
+
+    public String getType() { return type; }
+    public void setType(String type) { this.type = type; }
+
+    public String getOrderType() { return orderType; }
+    public void setOrderType(String orderType) { this.orderType = orderType; }
+
+    public long getSize() { return size; }
+    public void setSize(long size) { this.size = size; }
+
+    public long getRemainingSize() { return remainingSize; }
+    public void setRemainingSize(long remainingSize) { this.remainingSize = remainingSize; }
+
+    public long getTimestamp() { return timestamp; }
+    public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
+
+    public OrderStatus getStatus() { return status; }
+    public void setStatus(OrderStatus status) { this.status = status; }
+
+    public Long getLimitPrice() { return limitPrice; }
+    public void setLimitPrice(Long limitPrice) { this.limitPrice = limitPrice; }
+
+    public Long getStopPrice() { return stopPrice; }
+    public void setStopPrice(Long stopPrice) { this.stopPrice = stopPrice; }
+
+    public Long getExecutionPrice() { return executionPrice; }
+    public void setExecutionPrice(Long executionPrice) { this.executionPrice = executionPrice; }
+
+    // Metodi di utilità
+    public boolean isCompleted() {
+        return status == OrderStatus.COMPLETED;
     }
 
-    /**
-     * Costruttore privato per impedire istanziazione
-     */
-    private Constants() {
-        throw new UnsupportedOperationException("Constants class cannot be instantiated");
+    public boolean canBeCancelled() {
+        return status == OrderStatus.ACTIVE || status == OrderStatus.PARTIALLY_FILLED;
+    }
+
+    public void executePartially(long executedSize, long price) {
+        this.remainingSize -= executedSize;
+        this.executionPrice = price;
+
+        if (this.remainingSize <= 0) {
+            this.status = OrderStatus.COMPLETED;
+        } else {
+            this.status = OrderStatus.PARTIALLY_FILLED;
+        }
+    }
+
+    @Override
+    public String toString() {
+        return String.format("Order{id=%d, user='%s', type='%s', orderType='%s', size=%d, remaining=%d, status=%s}",
+                orderId, username, type, orderType, size, remainingSize, status);
     }
 }
