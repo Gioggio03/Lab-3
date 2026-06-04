@@ -1,406 +1,329 @@
 package Server;
 
-import Common.Order;
-import Common.TradeRecord;
+import Common.Constants;
+import Common.User;
+import Utils.JSONConverter;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
-public class OrderBook {
+public class UserManager {
 
-    // Strutture dati per gli ordini attivi
-    // TreeMap per ordinamento automatico, LinkedList per ordine temporale a parità di prezzo
-    private final TreeMap<Long, LinkedList<Order>> bidOrders;  // Prezzi decrescenti
-    private final TreeMap<Long, LinkedList<Order>> askOrders;  // Prezzi crescenti
+    // Mappa degli utenti registrati (username -> User)
+    private final ConcurrentHashMap<String, User> registeredUsers;
 
-    // Mappa per accesso rapido agli ordini per ID
-    private final ConcurrentHashMap<Long, Order> orderById;
+    // Set degli utenti attualmente loggati
+    private final Set<String> loggedInUsers;
 
-    // Ordini di tipo Stop in attesa
-    private final List<Order> stopOrders;
+    // Scheduler per controllo timeout inattività
+    private final ScheduledExecutorService scheduler;
 
-    // Lock per thread safety
-    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+    public UserManager() {
+        this.registeredUsers = new ConcurrentHashMap<>();
+        this.loggedInUsers = Collections.synchronizedSet(new HashSet<>());
+        this.scheduler = Executors.newScheduledThreadPool(1);
 
-    // Prezzo dell'ultimo trade (per gestire Stop Orders)
-    private volatile Long lastTradePrice = null;
-
-    // Callback per notificare trades completati
-    private TradeExecutionCallback tradeCallback;
-
-    public interface TradeExecutionCallback {
-        void onTradeExecuted(List<TradeRecord> trades);
-    }
-
-    public OrderBook() {
-        // Bid: prezzi decrescenti (il più alto per primo)
-        this.bidOrders = new TreeMap<>(Collections.reverseOrder());
-        // Ask: prezzi crescenti (il più basso per primo)
-        this.askOrders = new TreeMap<>();
-        this.orderById = new ConcurrentHashMap<>();
-        this.stopOrders = new ArrayList<>();
-    }
-
-    public void setTradeCallback(TradeExecutionCallback callback) {
-        this.tradeCallback = callback;
+        // Avvia il controllo periodico per logout automatico
+        startInactivityCheck();
     }
 
     /**
-     * Aggiunge un ordine all'order book e tenta il matching
+     * Carica gli utenti dal file JSON
      */
-    public List<TradeRecord> addOrder(Order order) {
-        lock.writeLock().lock();
+    public void loadUsers() {
         try {
-            List<TradeRecord> trades = new ArrayList<>();
+            File usersFile = new File(Constants.USERS_FILE);
 
-            // Se è Market Order, prova esecuzione immediata
-            if ("market".equals(order.getOrderType())) {
-                trades = executeMarketOrder(order);
-            }
-            // Se è Limit Order, prova matching e poi aggiunge se non completato
-            else if ("limit".equals(order.getOrderType())) {
-                trades = executeLimitOrder(order);
-            }
-            // Se è Stop Order, lo aggiunge alla lista di stop orders
-            else if ("stop".equals(order.getOrderType())) {
-                stopOrders.add(order);
-                orderById.put(order.getOrderId(), order);
+            // Crea la directory se non esiste
+            File parentDir = usersFile.getParentFile();
+            if (parentDir != null && !parentDir.exists()) {
+                parentDir.mkdirs();
             }
 
-            // Aggiorna il prezzo dell'ultimo trade se ci sono stati trades
-            if (!trades.isEmpty()) {
-                lastTradePrice = trades.get(trades.size() - 1).getPrice();
-                // Controlla se ci sono Stop Orders da attivare
-                checkStopOrders();
+            // Se il file non esiste, inizia con lista vuota
+            if (!usersFile.exists()) {
+                System.out.println("File utenti non trovato, inizializzazione con lista vuota");
+                return;
             }
 
-            // Notifica i trades se c'è un callback
-            if (tradeCallback != null && !trades.isEmpty()) {
-                tradeCallback.onTradeExecuted(trades);
+            // Legge il contenuto del file
+            String jsonContent = new String(Files.readAllBytes(Paths.get(Constants.USERS_FILE)));
+
+            if (jsonContent.trim().isEmpty()) {
+                System.out.println("File utenti vuoto, inizializzazione con lista vuota");
+                return;
             }
 
-            return trades;
+            // Converte da JSON
+            List<User> users = JSONConverter.jsonToUsers(jsonContent);
 
-        } finally {
-            lock.writeLock().unlock();
-        }
-    }
-
-    /**
-     * Esegue un Market Order
-     */
-    private List<TradeRecord> executeMarketOrder(Order marketOrder) {
-        List<TradeRecord> trades = new ArrayList<>();
-
-        if ("bid".equals(marketOrder.getType())) {
-            // Market buy: prende dai migliori ask (prezzi più bassi)
-            trades = matchWithBestOrders(marketOrder, askOrders);
-        } else if ("ask".equals(marketOrder.getType())) {
-            // Market sell: prende dai migliori bid (prezzi più alti)
-            trades = matchWithBestOrders(marketOrder, bidOrders);
-        }
-
-        // Se il Market Order non è stato completamente eseguito, viene scartato
-        if (marketOrder.getRemainingSize() > 0) {
-            marketOrder.setStatus(Order.OrderStatus.CANCELLED);
-        }
-
-        return trades;
-    }
-
-    /**
-     * Esegue un Limit Order
-     */
-    private List<TradeRecord> executeLimitOrder(Order limitOrder) {
-        List<TradeRecord> trades = new ArrayList<>();
-
-        if ("bid".equals(limitOrder.getType())) {
-            // Limit buy: matcha con ask orders a prezzo <= limit price
-            trades = matchLimitOrder(limitOrder, askOrders, true);
-        } else if ("ask".equals(limitOrder.getType())) {
-            // Limit sell: matcha con bid orders a prezzo >= limit price
-            trades = matchLimitOrder(limitOrder, bidOrders, false);
-        }
-
-        // Se rimane qualcosa da eseguire, aggiunge all'order book
-        if (limitOrder.getRemainingSize() > 0 && !limitOrder.isCompleted()) {
-            addToOrderBook(limitOrder);
-        }
-
-        return trades;
-    }
-
-    /**
-     * Matcha un Market Order con i migliori ordini disponibili
-     */
-    private List<TradeRecord> matchWithBestOrders(Order marketOrder, TreeMap<Long, LinkedList<Order>> oppositeOrders) {
-        List<TradeRecord> trades = new ArrayList<>();
-
-        while (marketOrder.getRemainingSize() > 0 && !oppositeOrders.isEmpty()) {
-            Map.Entry<Long, LinkedList<Order>> bestEntry = oppositeOrders.firstEntry();
-            LinkedList<Order> ordersAtPrice = bestEntry.getValue();
-
-            if (ordersAtPrice.isEmpty()) {
-                oppositeOrders.remove(bestEntry.getKey());
-                continue;
-            }
-
-            Order matchingOrder = ordersAtPrice.getFirst();
-            List<TradeRecord> newTrades = executeTradeWithBothRecords(marketOrder, matchingOrder, matchingOrder.getLimitPrice());
-
-            trades.addAll(newTrades);
-
-            // Rimuove ordini completati
-            if (matchingOrder.isCompleted()) {
-                ordersAtPrice.removeFirst();
-                orderById.remove(matchingOrder.getOrderId());
-
-                if (ordersAtPrice.isEmpty()) {
-                    oppositeOrders.remove(bestEntry.getKey());
+            if (users != null) {
+                for (User user : users) {
+                    registeredUsers.put(user.getUsername(), user);
+                    // Assicurati che tutti gli utenti siano marcati come non loggati all'avvio
+                    user.setLoggedIn(false);
                 }
-            }
-        }
-
-        return trades;
-    }
-
-    /**
-     * Matcha un Limit Order
-     */
-    private List<TradeRecord> matchLimitOrder(Order limitOrder, TreeMap<Long, LinkedList<Order>> oppositeOrders, boolean isBuyOrder) {
-        List<TradeRecord> trades = new ArrayList<>();
-        Long limitPrice = limitOrder.getLimitPrice();
-
-        Iterator<Map.Entry<Long, LinkedList<Order>>> iterator = oppositeOrders.entrySet().iterator();
-
-        while (iterator.hasNext() && limitOrder.getRemainingSize() > 0) {
-            Map.Entry<Long, LinkedList<Order>> entry = iterator.next();
-            Long price = entry.getKey();
-            LinkedList<Order> ordersAtPrice = entry.getValue();
-
-            // Controlla se il prezzo è compatibile
-            boolean canMatch = isBuyOrder ? (price <= limitPrice) : (price >= limitPrice);
-
-            if (!canMatch) {
-                break; // Non ci sono più prezzi compatibili
+                System.out.println("Caricati " + users.size() + " utenti registrati");
+            } else {
+                System.err.println("Errore nel parsing del file utenti");
             }
 
-            while (!ordersAtPrice.isEmpty() && limitOrder.getRemainingSize() > 0) {
-                Order matchingOrder = ordersAtPrice.getFirst();
-                List<TradeRecord> newTrades = executeTradeWithBothRecords(limitOrder, matchingOrder, price);
-
-                trades.addAll(newTrades);
-
-                if (matchingOrder.isCompleted()) {
-                    ordersAtPrice.removeFirst();
-                    orderById.remove(matchingOrder.getOrderId());
-                }
-            }
-
-            if (ordersAtPrice.isEmpty()) {
-                iterator.remove();
-            }
-        }
-
-        return trades;
-    }
-
-    /**
-     * Esegue un trade tra due ordini e crea i record per entrambi
-     */
-
-    private List<TradeRecord> executeTradeWithBothRecords(Order order1, Order order2, Long tradePrice) {
-        long tradeSize = Math.min(order1.getRemainingSize(), order2.getRemainingSize());
-        List<TradeRecord> trades = new ArrayList<>();
-
-        if (tradeSize <= 0) {
-            return trades;
-        }
-
-        // Aggiorna gli ordini
-        order1.executePartially(tradeSize, tradePrice);
-        order2.executePartially(tradeSize, tradePrice);
-
-        long timestamp = System.currentTimeMillis() / 1000;
-
-        // Crea trade record per il primo ordine (con username)
-        TradeRecord trade1 = new TradeRecord(order1.getOrderId(), order1.getUsername(), order1.getType(),
-                order1.getOrderType(), tradeSize, tradePrice, timestamp);
-
-        // Crea trade record per il secondo ordine (con username)
-        TradeRecord trade2 = new TradeRecord(order2.getOrderId(), order2.getUsername(), order2.getType(),
-                order2.getOrderType(), tradeSize, tradePrice, timestamp);
-
-        trades.add(trade1);
-        trades.add(trade2);
-
-        return trades;
-    }
-
-    /**
-     * Aggiunge un ordine all'order book
-     */
-    private void addToOrderBook(Order order) {
-        TreeMap<Long, LinkedList<Order>> targetMap = "bid".equals(order.getType()) ? bidOrders : askOrders;
-        Long price = order.getLimitPrice();
-
-        targetMap.computeIfAbsent(price, k -> new LinkedList<>()).addLast(order);
-        orderById.put(order.getOrderId(), order);
-    }
-
-    /**
-     * Controlla se ci sono Stop Orders da attivare
-     */
-    private void checkStopOrders() {
-        if (lastTradePrice == null) return;
-
-        Iterator<Order> iterator = stopOrders.iterator();
-        List<Order> toActivate = new ArrayList<>();
-
-        while (iterator.hasNext()) {
-            Order stopOrder = iterator.next();
-            Long stopPrice = stopOrder.getStopPrice();
-
-            boolean shouldActivate = false;
-
-            if ("bid".equals(stopOrder.getType())) {
-                // Stop buy: attiva se prezzo >= stop price
-                shouldActivate = lastTradePrice >= stopPrice;
-            } else if ("ask".equals(stopOrder.getType())) {
-                // Stop sell: attiva se prezzo <= stop price
-                shouldActivate = lastTradePrice <= stopPrice;
-            }
-
-            if (shouldActivate) {
-                toActivate.add(stopOrder);
-                iterator.remove();
-                orderById.remove(stopOrder.getOrderId());
-            }
-        }
-
-        // Attiva gli stop orders come market orders
-        for (Order stopOrder : toActivate) {
-            Order marketOrder = new Order(stopOrder.getOrderId(), stopOrder.getUsername(),
-                    stopOrder.getType(), stopOrder.getSize());
-            List<TradeRecord> stopTrades = executeMarketOrder(marketOrder);
-
-            // I trades degli stop orders vengono già gestiti dal callback principale
-            // Quindi non è necessario fare nulla di specifico qui
+        } catch (IOException e) {
+            System.err.println("Errore nel caricamento utenti: " + e.getMessage());
         }
     }
 
     /**
-     * Cancella un ordine
+     * Salva gli utenti su file JSON
      */
-    public boolean cancelOrder(long orderId, String username) {
-        lock.writeLock().lock();
+    public void saveUsers() {
         try {
-            Order order = orderById.get(orderId);
-
-            if (order == null || !order.getUsername().equals(username) || !order.canBeCancelled()) {
-                return false;
+            // Crea la directory se non esiste
+            File usersFile = new File(Constants.USERS_FILE);
+            File parentDir = usersFile.getParentFile();
+            if (parentDir != null && !parentDir.exists()) {
+                parentDir.mkdirs();
             }
 
-            // Rimuove dall'order book
-            if ("limit".equals(order.getOrderType())) {
-                TreeMap<Long, LinkedList<Order>> targetMap = "bid".equals(order.getType()) ? bidOrders : askOrders;
-                LinkedList<Order> ordersAtPrice = targetMap.get(order.getLimitPrice());
+            // Converte la lista di utenti in JSON
+            List<User> usersList = new ArrayList<>(registeredUsers.values());
+            String jsonContent = JSONConverter.usersToJSON(usersList);
 
-                if (ordersAtPrice != null) {
-                    ordersAtPrice.remove(order);
-                    if (ordersAtPrice.isEmpty()) {
-                        targetMap.remove(order.getLimitPrice());
-                    }
-                }
-            } else if ("stop".equals(order.getOrderType())) {
-                stopOrders.remove(order);
+            if (jsonContent != null) {
+                Files.write(Paths.get(Constants.USERS_FILE), jsonContent.getBytes());
+                System.out.println("Salvati " + usersList.size() + " utenti");
+            } else {
+                System.err.println("Errore nella conversione utenti in JSON");
             }
 
-            orderById.remove(orderId);
-            order.setStatus(Order.OrderStatus.CANCELLED);
-
-            return true;
-
-        } finally {
-            lock.writeLock().unlock();
+        } catch (IOException e) {
+            System.err.println("Errore nel salvataggio utenti: " + e.getMessage());
         }
     }
 
     /**
-     * Ottiene lo stato attuale dell'order book
+     * Aggiunge un nuovo utente
      */
-    public OrderBookSnapshot getSnapshot() {
-        lock.readLock().lock();
+    public boolean addUser(User user) {
+        if (user == null || user.getUsername() == null) {
+            return false;
+        }
+
+        // Controlla se l'username esiste già
+        if (registeredUsers.containsKey(user.getUsername())) {
+            return false;
+        }
+
+        registeredUsers.put(user.getUsername(), user);
+        System.out.println("Nuovo utente registrato: " + user.getUsername());
+        return true;
+    }
+
+    /**
+     * Verifica se un utente esiste
+     */
+    public boolean userExists(String username) {
+        return username != null && registeredUsers.containsKey(username);
+    }
+
+    /**
+     * Ottiene un utente per username
+     */
+    public User getUser(String username) {
+        return username != null ? registeredUsers.get(username) : null;
+    }
+
+    /**
+     * Autentica un utente
+     */
+    public boolean authenticateUser(String username, String password) {
+        User user = getUser(username);
+        return user != null && user.verifyPassword(password);
+    }
+
+    /**
+     * Effettua il login di un utente
+     */
+    public boolean loginUser(String username) {
+        User user = getUser(username);
+        if (user == null) {
+            return false;
+        }
+
+        // Controlla se è già loggato
+        if (loggedInUsers.contains(username)) {
+            return false;
+        }
+
+        // Effettua il login
+        user.login();
+        loggedInUsers.add(username);
+
+        System.out.println("Login effettuato per: " + username);
+        return true;
+    }
+
+    /**
+     * Effettua il logout di un utente
+     */
+    public boolean logoutUser(String username) {
+        User user = getUser(username);
+        if (user == null) {
+            return false;
+        }
+
+        // Effettua il logout
+        user.logout();
+        loggedInUsers.remove(username);
+
+        System.out.println("Logout effettuato per: " + username);
+        return true;
+    }
+
+    /**
+     * Verifica se un utente è loggato
+     */
+    public boolean isUserLoggedIn(String username) {
+        return username != null && loggedInUsers.contains(username);
+    }
+
+    /**
+     * Aggiorna l'attività di un utente
+     */
+    public void updateUserActivity(String username) {
+        User user = getUser(username);
+        if (user != null && isUserLoggedIn(username)) {
+            user.updateActivity();
+        }
+    }
+
+    /**
+     * Aggiorna la password di un utente
+     */
+    public int updatePassword(String username, String oldPassword, String newPassword) {
+        User user = getUser(username);
+
+        // Controlla se l'utente esiste
+        if (user == null) {
+            return Constants.RESPONSE_UPDATE_USERNAME_PASSWORD_MISMATCH;
+        }
+
+        // Controlla se l'utente è attualmente loggato
+        if (isUserLoggedIn(username)) {
+            return Constants.RESPONSE_UPDATE_USER_LOGGED_IN;
+        }
+
+        // Valida la nuova password
+        if (newPassword == null || newPassword.trim().isEmpty()) {
+            return Constants.RESPONSE_UPDATE_INVALID_NEW_PASSWORD;
+        }
+
+        // Controlla se la nuova password è uguale alla vecchia
+        if (oldPassword != null && oldPassword.equals(newPassword)) {
+            return Constants.RESPONSE_UPDATE_SAME_PASSWORD;
+        }
+
+        // Verifica la password attuale e aggiorna
+        if (user.changePassword(oldPassword, newPassword)) {
+            System.out.println("Password aggiornata per: " + username);
+            return Constants.RESPONSE_OK;
+        } else {
+            return Constants.RESPONSE_UPDATE_USERNAME_PASSWORD_MISMATCH;
+        }
+    }
+
+    /**
+     * Ottiene tutti gli utenti registrati
+     */
+    public List<User> getAllUsers() {
+        return new ArrayList<>(registeredUsers.values());
+    }
+
+    /**
+     * Ottiene tutti gli utenti loggati
+     */
+    public Set<String> getLoggedInUsers() {
+        return new HashSet<>(loggedInUsers);
+    }
+
+    /**
+     * Forza il logout di utenti inattivi
+     */
+    public void forceLogoutInactiveUsers() {
+        Set<String> usersToLogout = new HashSet<>();
+
+        for (String username : loggedInUsers) {
+            User user = getUser(username);
+            if (user != null && user.isInactive(Constants.USER_INACTIVITY_TIMEOUT)) {
+                usersToLogout.add(username);
+            }
+        }
+
+        for (String username : usersToLogout) {
+            logoutUser(username);
+            System.out.println("Logout automatico per inattività: " + username);
+        }
+
+        if (!usersToLogout.isEmpty()) {
+            System.out.println("Disconnessi " + usersToLogout.size() + " utenti per inattività");
+        }
+    }
+
+    /**
+     * Avvia il controllo periodico per l'inattività
+     */
+    private void startInactivityCheck() {
+        scheduler.scheduleAtFixedRate(
+                this::forceLogoutInactiveUsers,
+                60, // Primo controllo dopo 1 minuto
+                60, // Poi ogni minuto
+                TimeUnit.SECONDS
+        );
+
+        System.out.println("Controllo inattività utenti avviato (ogni 60 secondi)");
+    }
+
+    /**
+     * Ferma il UserManager e libera le risorse
+     */
+    public void shutdown() {
+        // Salva tutti i dati prima di chiudere
+        saveUsers();
+
+        // Forza logout di tutti gli utenti
+        for (String username : new HashSet<>(loggedInUsers)) {
+            logoutUser(username);
+        }
+
+        // Ferma lo scheduler
+        scheduler.shutdown();
         try {
-            // Crea lista combinata di tutti gli ordini attivi
-            List<Order> allActiveOrders = new ArrayList<>();
-
-            // Aggiungi ordini bid
-            for (LinkedList<Order> orders : bidOrders.values()) {
-                allActiveOrders.addAll(orders);
+            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                scheduler.shutdownNow();
             }
-
-            // Aggiungi ordini ask
-            for (LinkedList<Order> orders : askOrders.values()) {
-                allActiveOrders.addAll(orders);
-            }
-
-            // Aggiungi stop orders
-            allActiveOrders.addAll(stopOrders);
-
-            return new OrderBookSnapshot(
-                    new TreeMap<>(bidOrders),
-                    new TreeMap<>(askOrders),
-                    lastTradePrice,
-                    stopOrders.size(),
-                    allActiveOrders
-            );
-        } finally {
-            lock.readLock().unlock();
+        } catch (InterruptedException e) {
+            scheduler.shutdownNow();
         }
+
+        System.out.println("UserManager terminato");
     }
 
     /**
-     * Classe per snapshot dell'order book
+     * Ottiene statistiche degli utenti
      */
-    public static class OrderBookSnapshot {
-        private final TreeMap<Long, LinkedList<Order>> bidOrders;
-        private final TreeMap<Long, LinkedList<Order>> askOrders;
-        private final Long lastTradePrice;
-        private final int stopOrdersCount;
-        private final List<Order> allActiveOrders;
-
-        public OrderBookSnapshot(TreeMap<Long, LinkedList<Order>> bidOrders,
-                                 TreeMap<Long, LinkedList<Order>> askOrders,
-                                 Long lastTradePrice, int stopOrdersCount,
-                                 List<Order> allActiveOrders) {
-            this.bidOrders = bidOrders;
-            this.askOrders = askOrders;
-            this.lastTradePrice = lastTradePrice;
-            this.stopOrdersCount = stopOrdersCount;
-            this.allActiveOrders = allActiveOrders;
-        }
-
-        // Getter methods
-        public TreeMap<Long, LinkedList<Order>> getBidOrders() { return bidOrders; }
-        public TreeMap<Long, LinkedList<Order>> getAskOrders() { return askOrders; }
-        public Long getLastTradePrice() { return lastTradePrice; }
-        public int getStopOrdersCount() { return stopOrdersCount; }
-        public List<Order> getAllActiveOrders() { return allActiveOrders; }
-
-        public Long getBestBidPrice() {
-            return bidOrders.isEmpty() ? null : bidOrders.firstKey();
-        }
-
-        public Long getBestAskPrice() {
-            return askOrders.isEmpty() ? null : askOrders.firstKey();
-        }
-
-        public Long getBidAskSpread() {
-            Long bestBid = getBestBidPrice();
-            Long bestAsk = getBestAskPrice();
-            return (bestBid != null && bestAsk != null) ? bestAsk - bestBid : null;
-        }
+    public Map<String, Object> getStatistics() {
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("totalRegistered", registeredUsers.size());
+        stats.put("currentlyLoggedIn", loggedInUsers.size());
+        stats.put("loggedInUsers", new ArrayList<>(loggedInUsers));
+        return stats;
     }
+
 }
